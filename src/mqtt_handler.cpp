@@ -1,82 +1,233 @@
-#include <Arduino.h>
-#include <PubSubClient.h>
-#include <WiFiClient.h>
-#include "config.h"
+#include "mqtt_handler.h"
 
-WiFiClient wifiClient;
-PubSubClient mqttClient(wifiClient);
-
-void initMQTT()
+// Register type constants
+enum RegisterType
 {
-    mqttClient.setServer(MQTT_SERVER, MQTT_PORT);
-    mqttClient.setCallback(mqttCallback);
+    REG_COIL = 0,
+    REG_DISCRETE = 1,
+    REG_INPUT = 2,
+    REG_HOLDING = 3
+};
 
-    Serial.println("MQTT client initialized");
+MQTTHandler *MQTTHandler::instance = nullptr;
+
+void MQTTHandler::begin(SIM800Handler *sim800)
+{
+    this->sim800 = sim800;
+    clientId = generateClientId();
+
+    // Set static instance for callback
+    instance = this;
+
+    // Set callback
+    // Note: This depends on your PubSubClient version
+    // mqttClient.setCallback(mqttCallback);
+
+    Serial.print("MQTT Handler initialized. Client ID: ");
+    Serial.println(clientId);
 }
 
-void mqttCallback(char *topic, byte *payload, unsigned int length)
+String MQTTHandler::generateClientId()
 {
-    // Forward to main handler
-    handleMQTTCommand(topic, payload, length);
+    uint32_t chipId = ESP.getChipId();
+    char clientIdBuf[50];
+    snprintf(clientIdBuf, sizeof(clientIdBuf), "modbus-gateway-%08X", chipId);
+    return String(clientIdBuf);
 }
 
-bool reconnectMQTT()
+String MQTTHandler::getBaseTopic()
 {
-    Serial.print("Connecting to MQTT...");
+    return "modbus/" + clientId;
+}
 
-    if (mqttClient.connect(MQTT_CLIENT_ID, MQTT_USER, MQTT_PASSWORD))
+String MQTTHandler::getDataTopic()
+{
+    return getBaseTopic() + "/data";
+}
+
+String MQTTHandler::getCommandTopic()
+{
+    return getBaseTopic() + "/command";
+}
+
+String MQTTHandler::getResponseTopic()
+{
+    return getBaseTopic() + "/response";
+}
+
+String MQTTHandler::getStatusTopic()
+{
+    return getBaseTopic() + "/status";
+}
+
+void MQTTHandler::loop()
+{
+    if (sim800->isMQTTConnected())
     {
-        Serial.println("connected");
+        sim800->mqttLoop();
+    }
+}
 
-        // Subscribe to command topics
-        mqttClient.subscribe(TOPIC_COMMANDS);
-        mqttClient.subscribe(TOPIC_CONFIG);
+void MQTTHandler::publishData(JsonDocument &data)
+{
+    if (!isConnected())
+        return;
 
-        // Publish connection message
-        mqttClient.publish(TOPIC_STATUS, "{\"status\":\"connected\"}");
+    String jsonStr;
+    serializeJson(data, jsonStr);
 
-        return true;
+    if (sim800->mqttPublish(getDataTopic().c_str(), jsonStr.c_str()))
+    {
+        messageCount++;
     }
     else
     {
-        Serial.printf("failed, rc=%d\n", mqttClient.state());
-        return false;
+        Serial.println("Failed to publish data");
     }
 }
 
-void mqttLoop()
+void MQTTHandler::publishRaw(const char *topic, const char *payload)
 {
-    if (!mqttClient.connected())
+    if (!isConnected())
+        return;
+
+    sim800->mqttPublish(topic, payload);
+}
+
+void MQTTHandler::publishStatus(const char *payload)
+{
+    if (!isConnected())
+        return;
+
+    sim800->mqttPublish(getStatusTopic().c_str(), payload);
+}
+
+void MQTTHandler::subscribeToCommands()
+{
+    if (!isConnected())
+        return;
+
+    if (sim800->mqttSubscribe(getCommandTopic().c_str()))
     {
+        Serial.print("Subscribed to command topic: ");
+        Serial.println(getCommandTopic());
+    }
+}
+
+void MQTTHandler::processMessages()
+{
+    // This would typically be called from the MQTT callback
+    // Implementation depends on your PubSubClient setup
+}
+
+bool MQTTHandler::hasPendingCommands()
+{
+    return !commandQueue.empty();
+}
+
+MQTTCommand MQTTHandler::getNextCommand()
+{
+    if (commandQueue.empty())
+    {
+        return MQTTCommand{};
+    }
+
+    MQTTCommand cmd = commandQueue.front();
+    commandQueue.pop();
+    return cmd;
+}
+
+void MQTTHandler::sendCommandResponse(const MQTTCommand &cmd, bool success, const char *message)
+{
+    DynamicJsonDocument doc(512);
+
+    doc["command_id"] = cmd.commandId;
+    doc["address"] = cmd.address;
+    doc["value"] = cmd.value;
+    doc["type"] = (int)cmd.registerType;
+    doc["success"] = success;
+    doc["message"] = message;
+    doc["timestamp"] = millis();
+    doc["received_at"] = cmd.timestamp;
+
+    String jsonStr;
+    serializeJson(doc, jsonStr);
+
+    sim800->mqttPublish(getResponseTopic().c_str(), jsonStr.c_str());
+}
+
+bool MQTTHandler::isConnected()
+{
+    return sim800 && sim800->isMQTTConnected();
+}
+
+void MQTTHandler::onMessageReceived(String topic, String payload)
+{
+    Serial.print("MQTT message received: ");
+    Serial.print(topic);
+    Serial.print(" -> ");
+    Serial.println(payload);
+
+    // Parse JSON command
+    DynamicJsonDocument doc(512);
+    DeserializationError error = deserializeJson(doc, payload);
+
+    if (error)
+    {
+        Serial.print("Failed to parse JSON: ");
+        Serial.println(error.c_str());
         return;
     }
-    mqttClient.loop();
-}
 
-bool mqttConnected()
-{
-    return mqttClient.connected();
-}
+    MQTTCommand cmd;
+    cmd.topic = topic;
+    cmd.timestamp = millis();
+    cmd.clientId = doc["client_id"] | "";
+    cmd.address = doc["address"] | 0;
+    cmd.value = doc["value"] | 0.0;
+    cmd.commandId = doc["command_id"] | String(millis());
 
-bool mqttPublish(const char *topic, const char *payload, bool retained)
-{
-    if (!mqttClient.connected())
+    // Determine register type
+    String typeStr = doc["type"] | "holding";
+    if (typeStr == "coil")
     {
-        return false;
+        cmd.registerType = REG_COIL;
     }
-
-    bool result = mqttClient.publish(topic, payload, retained);
-
-#ifdef MQTT_DEBUG
-    if (result)
+    else if (typeStr == "discrete")
     {
-        Serial.printf("MQTT publish to %s: %s\n", topic, payload);
+        cmd.registerType = REG_DISCRETE;
+    }
+    else if (typeStr == "input")
+    {
+        cmd.registerType = REG_INPUT;
     }
     else
     {
-        Serial.printf("MQTT publish failed to %s\n", topic);
+        cmd.registerType = REG_HOLDING;
     }
-#endif
 
-    return result;
+    // Add to command queue
+    commandQueue.push(cmd);
+
+    Serial.print("Command queued: Address=0x");
+    Serial.print(cmd.address, HEX);
+    Serial.print(", Value=");
+    Serial.println(cmd.value);
+}
+
+void MQTTHandler::mqttCallback(char *topic, byte *payload, unsigned int length)
+{
+    if (instance)
+    {
+        String topicStr = String(topic);
+        String payloadStr;
+        payloadStr.reserve(length);
+
+        for (unsigned int i = 0; i < length; i++)
+        {
+            payloadStr += (char)payload[i];
+        }
+
+        instance->onMessageReceived(topicStr, payloadStr);
+    }
 }

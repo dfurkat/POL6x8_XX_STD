@@ -1,0 +1,28 @@
+{
+  "modbus": {
+    "slave_id": 1,
+    "baud_rate": 9600,
+    "parity": 0,
+    "stop_bits": 1
+  },
+  "mqtt": {
+    "server": "mqtt.your-server.com",
+    "port": 1883,
+    "user": "",
+    "password": ""
+  },
+  "cellular": {
+    "apn": "your-apn",
+    "user": "",
+    "pass": ""
+  },
+  "intervals": {
+    "modbus_poll": 5000,
+    "mqtt_publish": 10000,
+    "status_update": 30000
+  },
+  "debug": {
+    "enabled": true,
+    "log_level": 1
+  }
+}

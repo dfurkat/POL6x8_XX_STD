@@ -1,185 +1,404 @@
 #include <Arduino.h>
-#include <ArduinoJson.h>
-#include <Ticker.h>
-#include "config.h"
-#include "modbus_registers.h"
+#include <ESP8266WiFi.h>
+#include <SoftwareSerial.h>
+#include "modbus_handler.h"
+#include "mqtt_handler.h"
+#include "sim800_handler.h"
+#include "config_manager.h"
+#include "register_mapper.h"
 
-// Forward declarations
-void setup();
-void loop();
-void readAllRegisters();
-void publishToMQTT();
-void handleMQTTCommand(char *topic, byte *payload, unsigned int length);
-void watchdogCheck();
+// Hardware pins
+#define MODBUS_RX_PIN D5
+#define MODBUS_TX_PIN D6
+#define MODBUS_DE_RE_PIN D7
+#define SIM800_RX_PIN D1
+#define SIM800_TX_PIN D2
+#define SIM800_PWR_PIN D3
+#define SIM800_RST_PIN D4
+#define STATUS_LED D0
 
-// Global objects
-Ticker modbusTicker;
-Ticker mqttTicker;
-Ticker watchdogTicker;
-unsigned long lastWatchdogReset = 0;
+// Objects
+SoftwareSerial modbusSerial(MODBUS_RX_PIN, MODBUS_TX_PIN);
+SoftwareSerial sim800Serial(SIM800_RX_PIN, SIM800_TX_PIN);
+
+ModbusHandler modbusHandler;
+SIM800Handler sim800Handler;
+MQTTHandler mqttHandler;
+ConfigManager configManager;
+RegisterMapper registerMapper;
+
+// Timing
+unsigned long lastModbusPoll = 0;
+unsigned long lastMqttPublish = 0;
+unsigned long lastStatusBlink = 0;
+unsigned long connectionAttemptTime = 0;
+const unsigned long CONNECTION_RETRY_INTERVAL = 30000; // 30 seconds
+
+// System state
+enum SystemState
+{
+    STATE_INIT,
+    STATE_CONNECTING_CELLULAR,
+    STATE_CONNECTING_MQTT,
+    STATE_RUNNING,
+    STATE_ERROR
+};
+
+SystemState systemState = STATE_INIT;
+bool ledState = false;
+
+// Configuration
+SystemConfig config;
 
 void setup()
 {
-  Serial.begin(115200);
-  Serial.println("\n=== Climatix Controller Monitor ===");
+    Serial.begin(115200);
+    delay(1000);
 
-  // Initialize subsystems
-  initWiFi();
-  initMQTT();
-  initModbus();
-  initSIM800(); // Optional for cellular backup
+    Serial.println("\n\n====================================");
+    Serial.println("   MODBUS to MQTT Gateway v1.0");
+    Serial.println("====================================");
 
-  // Setup timers
-  modbusTicker.attach_ms(MODBUS_POLL_INTERVAL, readAllRegisters);
-  mqttTicker.attach_ms(MQTT_PUBLISH_INTERVAL, publishToMQTT);
-  watchdogTicker.attach_ms(WATCHDOG_TIMEOUT, watchdogCheck);
+    // Initialize pins
+    pinMode(MODBUS_DE_RE_PIN, OUTPUT);
+    pinMode(SIM800_PWR_PIN, OUTPUT);
+    pinMode(SIM800_RST_PIN, OUTPUT);
+    pinMode(STATUS_LED, OUTPUT);
 
-  // Initial read
-  readAllRegisters();
+    digitalWrite(MODBUS_DE_RE_PIN, LOW);
+    digitalWrite(SIM800_PWR_PIN, HIGH);
+    digitalWrite(SIM800_RST_PIN, HIGH);
+    digitalWrite(STATUS_LED, LOW);
 
-  Serial.println("System initialized successfully");
+    // Load configuration
+    Serial.println("Loading configuration...");
+    if (!configManager.loadConfig())
+    {
+        Serial.println("Failed to load config, creating default...");
+        config = configManager.getConfig();
+        configManager.saveConfig();
+    }
+    else
+    {
+        config = configManager.getConfig();
+        Serial.println("Configuration loaded successfully");
+    }
+
+    // Initialize serial ports
+    modbusSerial.begin(config.modbusBaudRate);
+    sim800Serial.begin(9600);
+
+    // Initialize handlers
+    modbusHandler.begin(modbusSerial, MODBUS_DE_RE_PIN, config.modbusSlaveId);
+    sim800Handler.begin(sim800Serial, SIM800_PWR_PIN, SIM800_RST_PIN);
+    registerMapper.begin();
+
+    Serial.println("System initialized");
+    Serial.print("Modbus slave ID: ");
+    Serial.println(config.modbusSlaveId);
+    Serial.print("Modbus baud rate: ");
+    Serial.println(config.modbusBaudRate);
+
+    systemState = STATE_CONNECTING_CELLULAR;
+    connectionAttemptTime = millis();
 }
 
 void loop()
 {
-  // Handle MQTT reconnection and messages
-  if (!mqttConnected())
-  {
-    reconnectMQTT();
-  }
-  mqttLoop();
+    unsigned long currentMillis = millis();
 
-  // Reset watchdog
-  lastWatchdogReset = millis();
+    // Status LED blinking based on state
+    if (currentMillis - lastStatusBlink > 500)
+    {
+        lastStatusBlink = currentMillis;
+        ledState = !ledState;
 
-  // Handle other tasks
-  handleSIM800(); // If using cellular
+        switch (systemState)
+        {
+        case STATE_INIT:
+            digitalWrite(STATUS_LED, LOW);
+            break;
+        case STATE_CONNECTING_CELLULAR:
+            digitalWrite(STATUS_LED, ledState ? HIGH : LOW); // Slow blink
+            break;
+        case STATE_CONNECTING_MQTT:
+            digitalWrite(STATUS_LED, ledState ? HIGH : LOW); // Slow blink
+            break;
+        case STATE_RUNNING:
+            digitalWrite(STATUS_LED, HIGH); // Solid on
+            break;
+        case STATE_ERROR:
+            digitalWrite(STATUS_LED, (currentMillis % 200) < 100 ? HIGH : LOW); // Fast blink
+            break;
+        }
+    }
 
-  delay(100);
+    // State machine
+    switch (systemState)
+    {
+    case STATE_CONNECTING_CELLULAR:
+        handleConnectingCellular(currentMillis);
+        break;
+
+    case STATE_CONNECTING_MQTT:
+        handleConnectingMQTT(currentMillis);
+        break;
+
+    case STATE_RUNNING:
+        handleRunningState(currentMillis);
+        break;
+
+    case STATE_ERROR:
+        handleErrorState(currentMillis);
+        break;
+
+    default:
+        break;
+    }
 }
 
-void readAllRegisters()
+void handleConnectingCellular(unsigned long currentMillis)
 {
-  static int readPhase = 0;
+    static unsigned long lastAttempt = 0;
 
-  switch (readPhase)
-  {
-  case 0:
-    readHoldingRegisters(ADDR_GENERAL_START, ADDR_GENERAL_END);
-    break;
-  case 1:
-    readHoldingRegisters(ADDR_HEATING1_START, ADDR_HEATING1_END);
-    break;
-  case 2:
-    readHoldingRegisters(ADDR_HEATING2_START, ADDR_HEATING2_END);
-    break;
-  case 3:
-    readHoldingRegisters(ADDR_HEATING3_START, ADDR_HEATING3_END);
-    break;
-  case 4:
-    readInputRegisters(REG_OUTSIDE_TEMP, REG_DHW2_RETURN_TEMP);
-    break;
-  case 5:
-    readCoils(COIL_ALARM_CONFIRM, 10); // First 10 coils
-    break;
-  }
+    if (currentMillis - lastAttempt > 2000)
+    {
+        lastAttempt = currentMillis;
 
-  readPhase = (readPhase + 1) % 6;
+        Serial.print("Connecting to cellular network (APN: ");
+        Serial.print(config.apn);
+        Serial.println(")...");
+
+        if (sim800Handler.connectToNetwork(config.apn, config.gprsUser, config.gprsPass))
+        {
+            Serial.println("✓ Cellular network connected!");
+            systemState = STATE_CONNECTING_MQTT;
+            connectionAttemptTime = currentMillis;
+        }
+        else
+        {
+            Serial.println("✗ Failed to connect to cellular network");
+
+            // Check if we should retry
+            if (currentMillis - connectionAttemptTime > CONNECTION_RETRY_INTERVAL)
+            {
+                Serial.println("Resetting SIM800...");
+                sim800Handler.reset();
+                connectionAttemptTime = currentMillis;
+            }
+        }
+    }
 }
 
-void publishToMQTT()
+void handleConnectingMQTT(unsigned long currentMillis)
 {
-  if (!mqttConnected())
-    return;
+    static unsigned long lastAttempt = 0;
 
-  StaticJsonDocument<1024> doc;
-  JsonObject telemetry = doc.createNestedObject("telemetry");
+    if (currentMillis - lastAttempt > 3000)
+    {
+        lastAttempt = currentMillis;
 
-  // Add temperature readings
-  telemetry["outside_temp"] = getRegisterValue(REG_OUTSIDE_TEMP, true);
-  telemetry["heating1_supply"] = getRegisterValue(REG_HEATING1_SUPPLY_TEMP, true);
-  telemetry["heating1_return"] = getRegisterValue(REG_HEATING1_RETURN_TEMP, true);
-  telemetry["dhw1_supply"] = getRegisterValue(REG_DHW1_SUPPLY_TEMP, true);
+        Serial.println("Configuring MQTT...");
+        sim800Handler.configureMQTT(config.mqttServer, config.mqttPort);
 
-  // Add system status
-  telemetry["heating1_mode"] = getRegisterValue(REG_HEATING1_MODE, false);
-  telemetry["system_hours"] = getRegisterValue(REG_SYSTEM_HOURS, false);
+        Serial.print("Connecting to MQTT server ");
+        Serial.print(config.mqttServer);
+        Serial.print(":");
+        Serial.print(config.mqttPort);
+        Serial.println("...");
 
-  // Add alarm status
-  telemetry["alarm"] = getDiscreteInput(INPUT_ALARM_STATUS);
+        String clientId = "modbus-gateway-" + String(ESP.getChipId(), HEX);
+        if (sim800Handler.connectMQTT(clientId.c_str(), config.mqttUser, config.mqttPassword))
+        {
+            Serial.println("✓ MQTT connected!");
 
-  // Convert to JSON string
-  char buffer[512];
-  size_t n = serializeJson(doc, buffer);
+            // Initialize MQTT handler
+            mqttHandler.begin(&sim800Handler);
+            mqttHandler.subscribeToCommands();
 
-  // Publish to MQTT
-  mqttPublish(TOPIC_TELEMETRY, buffer, n);
+            systemState = STATE_RUNNING;
+            Serial.println("✓ System is now RUNNING");
+            Serial.println("================================");
+        }
+        else
+        {
+            Serial.println("✗ Failed to connect to MQTT");
 
-  // Publish system status
-  mqttPublish(TOPIC_STATUS, "online", false);
+            if (currentMillis - connectionAttemptTime > CONNECTION_RETRY_INTERVAL)
+            {
+                systemState = STATE_CONNECTING_CELLULAR;
+                connectionAttemptTime = currentMillis;
+            }
+        }
+    }
 }
 
-void handleMQTTCommand(char *topic, byte *payload, unsigned int length)
+void handleRunningState(unsigned long currentMillis)
 {
-  Serial.printf("MQTT Command: %s\n", topic);
+    // Maintain MQTT connection
+    mqttHandler.loop();
 
-  // Parse JSON payload
-  StaticJsonDocument<256> doc;
-  DeserializationError error = deserializeJson(doc, payload, length);
+    // Check connection status
+    if (!sim800Handler.isNetworkConnected())
+    {
+        Serial.println("Lost cellular connection!");
+        systemState = STATE_CONNECTING_CELLULAR;
+        connectionAttemptTime = currentMillis;
+        return;
+    }
 
-  if (error)
-  {
-    Serial.printf("JSON parse error: %s\n", error.c_str());
-    return;
-  }
+    if (!sim800Handler.isMQTTConnected())
+    {
+        Serial.println("Lost MQTT connection!");
+        systemState = STATE_CONNECTING_MQTT;
+        connectionAttemptTime = currentMillis;
+        return;
+    }
 
-  // Check which command
-  if (strstr(topic, "set_mode"))
-  {
-    int circuit = doc["circuit"]; // 1, 2, 3 for heating, 4, 5 for DHW
-    int mode = doc["mode"];       // 0-3 as per MODBUS docs
+    // Process MQTT messages (commands)
+    mqttHandler.processMessages();
 
-    uint16_t regAddress;
-    if (circuit == 1)
-      regAddress = REG_HEATING1_MODE;
-    else if (circuit == 2)
-      regAddress = REG_HEATING1_MODE + 80; // Approx offset
-    else if (circuit == 4)
-      regAddress = REG_DHW1_MODE;
+    // Handle MQTT commands
+    if (mqttHandler.hasPendingCommands())
+    {
+        MQTTCommand cmd = mqttHandler.getNextCommand();
 
-    writeSingleRegister(regAddress, mode);
-  }
-  else if (strstr(topic, "set_setpoint"))
-  {
-    int circuit = doc["circuit"];
-    float setpoint = doc["setpoint"];
+        Serial.print("Executing command: ");
+        Serial.print(cmd.topic);
+        Serial.print(" -> Address: 0x");
+        Serial.print(cmd.address, HEX);
+        Serial.print(", Value: ");
+        Serial.println(cmd.value);
 
-    // Convert to MODBUS register value (usually temperature * 10)
-    uint16_t value = setpoint * 10;
-    writeSingleRegister(REG_HEATING1_SETPOINT + (circuit - 1) * 80, value);
-  }
-  else if (strstr(topic, "reset_alarm"))
-  {
-    writeSingleCoil(COIL_ALARM_CONFIRM, 1);
-  }
-  else if (strstr(topic, "save_settings"))
-  {
-    writeSingleCoil(COIL_SAVE_SETTINGS, 1);
-  }
-  else if (strstr(topic, "load_settings"))
-  {
-    writeSingleCoil(COIL_LOAD_SETTINGS, 1);
-  }
+        // Get register info
+        RegisterInfo regInfo = registerMapper.getRegisterInfo(cmd.address);
 
-  // Acknowledge command
-  mqttPublish("climatix/01/ack", "{\"status\":\"processed\"}", false);
+        // Validate value range
+        if (cmd.value < regInfo.min_value || cmd.value > regInfo.max_value)
+        {
+            Serial.print("Value out of range! Min: ");
+            Serial.print(regInfo.min_value);
+            Serial.print(", Max: ");
+            Serial.println(regInfo.max_value);
+            mqttHandler.sendCommandResponse(cmd, false, "Value out of range");
+        }
+        else
+        {
+            // Execute Modbus write
+            bool writeSuccess = modbusHandler.writeRegister(
+                cmd.address, cmd.value, regInfo.type);
+
+            // Send response
+            mqttHandler.sendCommandResponse(cmd, writeSuccess,
+                                            writeSuccess ? "Success" : "Write failed");
+
+            if (writeSuccess)
+            {
+                // Immediately read back to verify
+                modbusHandler.pollSingleRegister(cmd.address, regInfo.type);
+            }
+        }
+    }
+
+    // Read Modbus registers periodically
+    if (currentMillis - lastModbusPoll >= config.modbusPollInterval)
+    {
+        lastModbusPoll = currentMillis;
+
+        // Poll all register groups
+        bool success = modbusHandler.pollAllRegisters();
+
+        if (success)
+        {
+            // Get latest data as JSON
+            DynamicJsonDocument doc(4096);
+            if (modbusHandler.getDataAsJson(doc))
+            {
+                // Add system info
+                doc["_system"]["timestamp"] = currentMillis;
+                doc["_system"]["free_heap"] = ESP.getFreeHeap();
+                doc["_system"]["uptime"] = millis() / 1000;
+                doc["_system"]["rssi"] = "N/A"; // Not applicable for cellular
+
+                // Publish to MQTT
+                mqttHandler.publishData(doc);
+
+                // Also publish to individual topics if configured
+                publishIndividualRegisters();
+            }
+        }
+        else
+        {
+            Serial.println("Modbus poll failed!");
+        }
+    }
+
+    // Periodic MQTT status update
+    if (currentMillis - lastMqttPublish >= config.mqttPublishInterval)
+    {
+        lastMqttPublish = currentMillis;
+        publishSystemStatus();
+    }
 }
 
-void watchdogCheck()
+void handleErrorState(unsigned long currentMillis)
 {
-  if (millis() - lastWatchdogReset > WATCHDOG_TIMEOUT)
-  {
-    Serial.println("Watchdog timeout - resetting system");
-    ESP.restart();
-  }
+    static unsigned long lastErrorReport = 0;
+
+    if (currentMillis - lastErrorReport > 10000)
+    {
+        lastErrorReport = currentMillis;
+        Serial.println("System in ERROR state. Attempting recovery...");
+
+        // Try to reset and restart
+        sim800Handler.reset();
+        systemState = STATE_CONNECTING_CELLULAR;
+        connectionAttemptTime = currentMillis;
+    }
+}
+
+void publishIndividualRegisters()
+{
+    // Publish each register to its own topic for easier subscription
+    std::vector<RegisterValue> values = modbusHandler.getAllRegisterValues();
+
+    for (const auto &regValue : values)
+    {
+        RegisterInfo info = registerMapper.getRegisterInfo(regValue.address);
+
+        if (info.name)
+        {
+            // Create JSON for individual register
+            DynamicJsonDocument doc(256);
+            doc["value"] = regValue.value;
+            doc["timestamp"] = regValue.timestamp;
+            doc["address"] = regValue.address;
+            doc["type"] = info.type;
+            doc["unit"] = info.unit;
+
+            String jsonStr;
+            serializeJson(doc, jsonStr);
+
+            // Publish to topic like: modbus/registers/heating1_valveA_signal
+            String topic = "modbus/registers/" + String(info.name);
+            mqttHandler.publishRaw(topic.c_str(), jsonStr.c_str());
+        }
+    }
+}
+
+void publishSystemStatus()
+{
+    DynamicJsonDocument doc(512);
+
+    doc["status"] = "running";
+    doc["uptime"] = millis() / 1000;
+    doc["free_heap"] = ESP.getFreeHeap();
+    doc["modbus_polls"] = modbusHandler.getPollCount();
+    doc["mqtt_messages"] = mqttHandler.getMessageCount();
+    doc["cellular_strength"] = sim800Handler.getSignalStrength();
+
+    String jsonStr;
+    serializeJson(doc, jsonStr);
+
+    mqttHandler.publishStatus(jsonStr.c_str());
 }
