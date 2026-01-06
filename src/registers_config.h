@@ -324,7 +324,7 @@ const ModbusRegister counters[] = {
     {0x1300, "system_error_count", "Количество ошибок системы", "", REG_INPUT, 2, 1, 0, 0, 999999, 0},
     {0x1302, "heating1_error_count", "Количество ошибок КО 1", "", REG_INPUT, 2, 1, 0, 0, 99999, 0},
     {0x1304, "last_error_code", "Код последней ошибки", "", REG_INPUT, 1, 1, 0, 0, 65535, 0},
-    {0x1305, "last_error_timestamp", "Время последней ошибки", "", REG_INPUT, 2, 1, 0, 0, 0xFFFFFFFF, 0}};
+    {0x1305, "last_error_timestamp", "Время последней ошибки", "", REG_INPUT, 2, 1, 0, 0, 4294967295.0f, 0}};
 
 // ========== СИСТЕМНАЯ ИНФОРМАЦИЯ ==========
 

@@ -4,9 +4,6 @@
 #include <Arduino.h>
 #include <SoftwareSerial.h>
 
-// Include cellular config FIRST
-#include "cellular_config.h"
-
 // Forward declarations to avoid including headers in .h file
 class TinyGsm;
 template <typename T>

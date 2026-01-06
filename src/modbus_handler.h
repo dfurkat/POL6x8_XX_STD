@@ -33,16 +33,6 @@ struct RegisterInfo
     uint8_t precision;
 };
 
-// Static callback functions
-static void preTransmissionCallback();
-static void postTransmissionCallback();
-
-// Static pointer to instance
-static ModbusHandler *instance;
-
-// Instance method
-void setTransmitMode(bool transmit);
-
 class ModbusHandler
 {
 public:
