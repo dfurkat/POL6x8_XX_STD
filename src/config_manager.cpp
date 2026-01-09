@@ -1,4 +1,5 @@
 #include "config_manager.h"
+#include <LittleFS.h>
 
 bool ConfigManager::begin()
 {
@@ -24,13 +25,13 @@ bool ConfigManager::begin()
 
 bool ConfigManager::initFilesystem()
 {
-    if (!SPIFFS.begin())
+    if (!LittleFS.begin())
     {
-        Serial.println("SPIFFS mount failed, formatting...");
-        if (SPIFFS.format())
+        Serial.println("LittleFS mount failed, formatting...");
+        if (LittleFS.format())
         {
-            Serial.println("SPIFFS formatted successfully");
-            if (SPIFFS.begin())
+            Serial.println("LittleFS formatted successfully");
+            if (LittleFS.begin())
             {
                 return true;
             }
@@ -39,7 +40,7 @@ bool ConfigManager::initFilesystem()
     }
 
     // Check if config file exists
-    if (!SPIFFS.exists(configFile))
+    if (!LittleFS.exists(configFile))
     {
         Serial.println("Config file doesn't exist, will create default");
     }
@@ -49,7 +50,7 @@ bool ConfigManager::initFilesystem()
 
 bool ConfigManager::loadConfig()
 {
-    File file = SPIFFS.open(configFile, "r");
+    File file = LittleFS.open(configFile, "r");
     if (!file)
     {
         Serial.println("Failed to open config file for reading");
@@ -113,7 +114,7 @@ bool ConfigManager::loadConfig()
 
 bool ConfigManager::saveConfig()
 {
-    File file = SPIFFS.open(configFile, "w");
+    File file = LittleFS.open(configFile, "w");
     if (!file)
     {
         Serial.println("Failed to open config file for writing");

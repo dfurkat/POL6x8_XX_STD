@@ -93,8 +93,8 @@ const ModbusRegister heatingPumps1[] = {
     {0x0159, "heating1_pump_speed_setpoint", "Уставка скорости насоса", "%", REG_HOLDING, 1, 0.1, 0, 0, 100, 1},
 
     // Переключение насосов по времени
-    {0x0153, "heating1_pumps_switch_date", "Дата переключения насосов", "", REG_HOLDING, 2, 1, 0, 0, 0xFFFFFFFF, 0},
-    {0x0155, "heating1_pumps_switch_time", "Время переключения насосов", "", REG_HOLDING, 2, 1, 0, 0, 0xFFFFFFFF, 0},
+    {0x0153, "heating1_pumps_switch_date", "Дата переключения насосов", "", REG_HOLDING, 2, 1, 0, 0, 999999999.0f, 0},
+    {0x0155, "heating1_pumps_switch_time", "Время переключения насосов", "", REG_HOLDING, 2, 1, 0, 0, 999999999.0f, 0},
 
     // Толчок насоса
     {0x0102, "heating1_pump_kick_interval", "Интервал толчка насоса", "час", REG_HOLDING, 1, 1, 0, 0, 1000, 0},
@@ -330,14 +330,14 @@ const ModbusRegister counters[] = {
 
 const ModbusRegister systemInfo[] = {
     // Информация об устройстве
-    {0xF000, "device_model", "Модель устройства", "", REG_INPUT, 2, 1, 0, 0, 0xFFFFFFFF, 0},
-    {0xF002, "device_serial", "Серийный номер", "", REG_INPUT, 2, 1, 0, 0, 0xFFFFFFFF, 0},
+    {0xF000, "device_model", "Модель устройства", "", REG_INPUT, 2, 1, 0, 0, 999999999.0f, 0},
+    {0xF002, "device_serial", "Серийный номер", "", REG_INPUT, 2, 1, 0, 0, 999999999.0f, 0},
     {0xF004, "firmware_version", "Версия прошивки", "", REG_INPUT, 2, 0.01, 0, 0, 999.99, 2},
     {0xF006, "hardware_version", "Версия железа", "", REG_INPUT, 1, 0.1, 0, 0, 99.9, 1},
 
     // Статус системы
     {0xF010, "system_uptime", "Время работы системы", "ч", REG_INPUT, 2, 1, 0, 0, 999999, 0},
-    {0xF012, "system_datetime", "Дата и время системы", "", REG_HOLDING, 4, 1, 0, 0, 0xFFFFFFFF, 0},
+    {0xF012, "system_datetime", "Дата и время системы", "", REG_HOLDING, 4, 1, 0, 0, 999999999.0f, 0},
     {0xF016, "system_temperature", "Температура платы", "°C", REG_INPUT, 1, 0.1, 0, -40, 125, 1},
     {0xF017, "system_voltage", "Напряжение питания", "В", REG_INPUT, 1, 0.01, 0, 0, 30, 2},
 

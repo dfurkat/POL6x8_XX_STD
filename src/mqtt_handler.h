@@ -5,6 +5,7 @@
 #include <ArduinoJson.h>
 #include <queue>
 #include "sim800_handler.h"
+#include "registers_config.h" // Включаем для RegisterType
 
 struct MQTTCommand
 {
@@ -39,7 +40,10 @@ private:
     std::queue<MQTTCommand> commandQueue;
     uint32_t messageCount = 0;
 
-    void onMessageReceived(String topic, String payload);
+    // Обработка входящих MQTT сообщений
+    void onMessageReceived(const String &topic, const String &payload);
+
+    // Генерация ID и топиков
     String generateClientId();
     String getBaseTopic();
     String getDataTopic();
@@ -47,9 +51,9 @@ private:
     String getResponseTopic();
     String getStatusTopic();
 
-    // MQTT callback (static wrapper)
-    static void mqttCallback(char *topic, byte *payload, unsigned int length);
-    static MQTTHandler *instance;
+    // Парсинг JSON команд
+    bool parseCommand(const String &payload, MQTTCommand &cmd);
+    RegisterType stringToRegisterType(const String &typeStr);
 };
 
 #endif

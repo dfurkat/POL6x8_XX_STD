@@ -50,6 +50,14 @@ bool ledState = false;
 // Configuration
 SystemConfig config;
 
+// Forward declarations
+void handleConnectingCellular(unsigned long currentMillis);
+void handleConnectingMQTT(unsigned long currentMillis);
+void handleRunningState(unsigned long currentMillis);
+void handleErrorState(unsigned long currentMillis);
+void publishIndividualRegisters();
+void publishSystemStatus();
+
 void setup()
 {
     Serial.begin(115200);
@@ -218,7 +226,7 @@ void handleConnectingMQTT(unsigned long currentMillis)
 
             systemState = STATE_RUNNING;
             Serial.println("✓ System is now RUNNING");
-            Serial.println("================================");
+            Serial.println("===============================");
         }
         else
         {
@@ -271,7 +279,7 @@ void handleRunningState(unsigned long currentMillis)
         Serial.println(cmd.value);
 
         // Get register info
-        RegisterInfo regInfo = registerMapper.getRegisterInfo(cmd.address);
+        ModbusRegister regInfo = registerMapper.getRegisterInfo(cmd.address);
 
         // Validate value range
         if (cmd.value < regInfo.min_value || cmd.value > regInfo.max_value)
@@ -364,7 +372,7 @@ void publishIndividualRegisters()
 
     for (const auto &regValue : values)
     {
-        RegisterInfo info = registerMapper.getRegisterInfo(regValue.address);
+        ModbusRegister info = registerMapper.getRegisterInfo(regValue.address);
 
         if (info.name)
         {

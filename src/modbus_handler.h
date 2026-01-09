@@ -18,7 +18,7 @@ struct RegisterValue
     bool valid;
 };
 
-struct RegisterInfo
+struct ModbusRegisterInfo
 {
     uint16_t address;
     const char *name;
@@ -48,8 +48,11 @@ public:
     uint32_t getErrorCount() { return errorCount; }
 
     // Get register info
-    RegisterInfo getRegisterInfo(uint16_t address);
-    std::vector<RegisterInfo> getAllRegisterInfo();
+    ModbusRegisterInfo getRegisterInfo(uint16_t address);
+    std::vector<ModbusRegisterInfo> getAllRegisterInfo();
+
+    // Public for callback access
+    void setTransmitMode(bool transmit);
 
 private:
     ModbusMaster modbus;
@@ -65,7 +68,6 @@ private:
     std::vector<RegisterValue> registerValues;
 
     // Helper methods
-    void setTransmitMode(bool transmit);
     float readRegisterValue(const ModbusRegister &reg);
     float readRawRegister(uint16_t address, RegisterType type, uint8_t size);
     bool writeHoldingRegister(uint16_t address, uint16_t value);

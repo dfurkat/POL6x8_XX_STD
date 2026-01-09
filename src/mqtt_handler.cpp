@@ -1,27 +1,15 @@
 #include "mqtt_handler.h"
-
-// Register type constants
-enum RegisterType
-{
-    REG_COIL = 0,
-    REG_DISCRETE = 1,
-    REG_INPUT = 2,
-    REG_HOLDING = 3
-};
-
-MQTTHandler *MQTTHandler::instance = nullptr;
+#include "sim800_handler.h"
+#include "registers_config.h" // Для RegisterType
 
 void MQTTHandler::begin(SIM800Handler *sim800)
 {
     this->sim800 = sim800;
     clientId = generateClientId();
 
-    // Set static instance for callback
-    instance = this;
-
-    // Set callback
-    // Note: This depends on your PubSubClient version
-    // mqttClient.setCallback(mqttCallback);
+    // Устанавливаем callback для обработки входящих сообщений
+    sim800->setMessageCallback([this](const String &topic, const String &payload)
+                               { this->onMessageReceived(topic, payload); });
 
     Serial.print("MQTT Handler initialized. Client ID: ");
     Serial.println(clientId);
@@ -62,9 +50,13 @@ String MQTTHandler::getStatusTopic()
 
 void MQTTHandler::loop()
 {
-    if (sim800->isMQTTConnected())
+    if (sim800 && sim800->isMQTTConnected())
     {
+        // Обрабатываем входящие данные SIM800
         sim800->mqttLoop();
+
+        // Обрабатываем сообщения из очереди
+        processMessages();
     }
 }
 
@@ -116,8 +108,34 @@ void MQTTHandler::subscribeToCommands()
 
 void MQTTHandler::processMessages()
 {
-    // This would typically be called from the MQTT callback
-    // Implementation depends on your PubSubClient setup
+    // Проверяем наличие сообщений в SIM800Handler
+    while (sim800->hasMessages())
+    {
+        MQTTMessage msg = sim800->getNextMessage();
+
+        // Проверяем, является ли это командой
+        if (msg.topic == getCommandTopic() || msg.topic.endsWith("/command"))
+        {
+            MQTTCommand cmd;
+            if (parseCommand(msg.payload, cmd))
+            {
+                cmd.topic = msg.topic;
+                cmd.timestamp = msg.timestamp;
+                commandQueue.push(cmd);
+
+                Serial.print("Command parsed from topic: ");
+                Serial.println(msg.topic);
+            }
+        }
+        else
+        {
+            // Другие сообщения (логируем)
+            Serial.print("MQTT message (not a command): ");
+            Serial.print(msg.topic);
+            Serial.print(" -> ");
+            Serial.println(msg.payload);
+        }
+    }
 }
 
 bool MQTTHandler::hasPendingCommands()
@@ -161,73 +179,79 @@ bool MQTTHandler::isConnected()
     return sim800 && sim800->isMQTTConnected();
 }
 
-void MQTTHandler::onMessageReceived(String topic, String payload)
+void MQTTHandler::onMessageReceived(const String &topic, const String &payload)
 {
-    Serial.print("MQTT message received: ");
+    Serial.print("MQTT message received via callback: ");
     Serial.print(topic);
     Serial.print(" -> ");
     Serial.println(payload);
 
+    // Если это команда - парсим и добавляем в очередь
+    if (topic == getCommandTopic() || topic.endsWith("/command"))
+    {
+        MQTTCommand cmd;
+        if (parseCommand(payload, cmd))
+        {
+            cmd.topic = topic;
+            cmd.timestamp = millis();
+            commandQueue.push(cmd);
+
+            Serial.print("Command queued via callback: Address=0x");
+            Serial.print(cmd.address, HEX);
+            Serial.print(", Value=");
+            Serial.println(cmd.value);
+        }
+    }
+}
+
+bool MQTTHandler::parseCommand(const String &payload, MQTTCommand &cmd)
+{
     // Parse JSON command
     DynamicJsonDocument doc(512);
     DeserializationError error = deserializeJson(doc, payload);
 
     if (error)
     {
-        Serial.print("Failed to parse JSON: ");
+        Serial.print("Failed to parse JSON command: ");
         Serial.println(error.c_str());
-        return;
+        return false;
     }
 
-    MQTTCommand cmd;
-    cmd.topic = topic;
-    cmd.timestamp = millis();
+    // Извлекаем обязательные поля
+    if (!doc.containsKey("address") || !doc.containsKey("value"))
+    {
+        Serial.println("Command missing required fields (address or value)");
+        return false;
+    }
+
     cmd.clientId = doc["client_id"] | "";
-    cmd.address = doc["address"] | 0;
-    cmd.value = doc["value"] | 0.0;
+    cmd.address = doc["address"];
+    cmd.value = doc["value"];
     cmd.commandId = doc["command_id"] | String(millis());
 
-    // Determine register type
+    // Определяем тип регистра
     String typeStr = doc["type"] | "holding";
+    cmd.registerType = stringToRegisterType(typeStr);
+
+    return true;
+}
+
+RegisterType MQTTHandler::stringToRegisterType(const String &typeStr)
+{
     if (typeStr == "coil")
     {
-        cmd.registerType = REG_COIL;
+        return REG_COIL;
     }
     else if (typeStr == "discrete")
     {
-        cmd.registerType = REG_DISCRETE;
+        return REG_DISCRETE;
     }
     else if (typeStr == "input")
     {
-        cmd.registerType = REG_INPUT;
+        return REG_INPUT;
     }
     else
     {
-        cmd.registerType = REG_HOLDING;
-    }
-
-    // Add to command queue
-    commandQueue.push(cmd);
-
-    Serial.print("Command queued: Address=0x");
-    Serial.print(cmd.address, HEX);
-    Serial.print(", Value=");
-    Serial.println(cmd.value);
-}
-
-void MQTTHandler::mqttCallback(char *topic, byte *payload, unsigned int length)
-{
-    if (instance)
-    {
-        String topicStr = String(topic);
-        String payloadStr;
-        payloadStr.reserve(length);
-
-        for (unsigned int i = 0; i < length; i++)
-        {
-            payloadStr += (char)payload[i];
-        }
-
-        instance->onMessageReceived(topicStr, payloadStr);
+        return REG_HOLDING;
     }
 }
