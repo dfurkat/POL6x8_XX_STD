@@ -56,47 +56,7 @@ GND -> Common Ground
 
 ## Visual Connection Diagram:
 
-                   POWER (12V/5V)
-                      │
-                      ▼
-┌─────────────────────────────────────────┐
-│              POWER SUPPLY               │
-│      (12V→5V for ESP & MAX485)         │
-│      (12V→4V for SIM800)               │
-└─────────────┬─────────┬─────────────────┘
-              │         │
-              ▼         ▼
-        ┌─────────┐ ┌─────────┐
-        │  ESP8266│ │ SIM800L │
-        │ NodeMCU │ │  Module │
-        │   v2    │ │         │
-        └────┬────┘ └────┬────┘
-             │           │
-        D5 D6 D7    D1 D2 D3 D4
-         │  │  │     │  │  │  │
-         │  │  │     │  │  │  └──► RST
-         │  │  │     │  │  └─────► PWR
-         │  │  │     │  └────────► RX (ESP TX)
-         │  │  │     └───────────► TX (ESP RX)
-         │  │  │
-         │  │  └──DE/RE──┐
-         │  │            │
-         ▼  ▼            ▼
-     ┌──────────────────────┐
-     │     MAX485 Chip      │
-     │   (RS485 to TTL)     │
-     └──────────┬───────────┘
-                │
-            A   B   GND
-            │   │   │
-            ▼   ▼   ▼
-        ┌─────────────────┐
-        │  MODBUS DEVICE  │
-        │   (RS485 Bus)   │
-        └─────────────────┘
-
-Here's a mnemonic schema (memory aid diagram) for the system:
-
+![plot](./docs/connection.jpg)
 
 
 ## Installation
